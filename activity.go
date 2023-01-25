@@ -11,12 +11,13 @@ import (
 
 	"github.com/nxadm/tail"
 	"github.com/pocketbase/pocketbase"
-	"github.com/pocketbase/pocketbase/forms"
+	//"github.com/pocketbase/pocketbase/forms"
 	"github.com/pocketbase/pocketbase/models"
 )
 
 func doTail(a *pocketbase.PocketBase) {
-	reOpening := regexp.MustCompile(`.*Opening stream on module (?P<module>.) for client (?P<client>[^\s]+)\s+(?P<clientmod>.) with sid \d{1,} by user (?P<user>.*)`)
+	reOpening := regexp.MustCompile(`Opening stream on module (?P<module>[A-Z]) for client (?P<client>[^\s]+)\s+(?P<clientmod>.) with sid \d{1,} by user (?P<user>.*)`)
+	reClosing := regexp.MustCompile(`Closing stream of module ([A-Z])`)
 
 	time.Sleep(5 * time.Second)
 	t, err := tail.TailFile(
@@ -36,45 +37,36 @@ func doTail(a *pocketbase.PocketBase) {
 		log.Fatal(err)
 	}
 	for line := range t.Lines {
-		log.Println(line.Text)
 		parts := strings.Split(line.Text, " ")
-		if len(parts) < 3 {
-			log.Println("============================= MISSING PARTS =================")
+		if len(parts) < 3 || parts[2] != "xlxd:" {
 			continue
 		}
-		if parts[2] == "xlxd:" && parts[3] == "Opening" {
-			groups := reOpening.FindStringSubmatch(line.Text)
+		if strings.Contains(line.Text, "Sending connect packet to XLX peer") {
+			continue
+		}
+		log.Println(line.Text)
+		groups := reOpening.FindStringSubmatch(line.Text)
+		if len(groups) == 5 {
 			record := models.NewRecord(collection)
 			ts, err := time.ParseInLocation(time.RFC3339Nano, parts[0], tzLocation)
 			if err != nil {
 				log.Fatal(err)
 			}
-			/*
-				record.Set("ts", ts.Format(time.RFC3339))
-				record.Set("system", "299")
-				record.Set("module", parts[7])
-				record.Set("call", groups[4])
-				record.Set("via", groups[2]+"-"+groups[3])
-				if err := a.Dao().SaveRecord(record); err != nil {
-					log.Fatal(err)
-				}
-			*/
-			form := forms.NewRecordUpsert(a, record)
-
-			// or form.LoadRequest(r, "")
-			form.LoadData(map[string]any{
-				"ts":     ts.UnixMilli(),
-				"system": "299",
-				"module": parts[7],
-				"call":   strings.Split(groups[4], " ")[0],
-				"via":    groups[2] + "-" + groups[3],
-			})
-
-			// validate and submit (internally it calls app.Dao().SaveRecord(record) in a transaction)
-			if err := form.Submit(); err != nil {
+			via := groups[2]
+			if groups[3] != " " {
+				via = via + "-" + groups[3]
+			}
+			record.Set("ts", ts.UnixMilli())
+			record.Set("system", "299")
+			record.Set("module", groups[1])
+			record.Set("call", strings.Split(groups[4], " ")[0])
+			record.Set("via", via)
+			if err := a.Dao().SaveRecord(record); err != nil {
 				log.Fatal(err)
 			}
-		} else if parts[2] == "xlxd:" && parts[3] == "Closing" {
+		}
+		groups = reClosing.FindStringSubmatch(line.Text)
+		if len(groups) == 2 {
 			record := models.NewRecord(collection)
 			ts, err := time.ParseInLocation(time.RFC3339Nano, parts[0], tzLocation)
 			if err != nil {
@@ -88,22 +80,6 @@ func doTail(a *pocketbase.PocketBase) {
 			if err := a.Dao().SaveRecord(record); err != nil {
 				log.Fatal(err)
 			}
-		} else if strings.HasPrefix(parts[2], "ambed") && parts[3] == "Vocodec" {
-			/*
-				record := models.NewRecord(collection)
-				ts, err := time.ParseInLocation(time.RFC3339Nano, parts[0], tzLocation)
-				if err != nil {
-					log.Fatal(err)
-				}
-				record.Set("ts", ts.UnixMilli())
-				record.Set("system", "299X")
-				record.Set("module", "")
-				record.Set("call", parts[5]+parts[6]+parts[7])
-				record.Set("via", parts[8])
-				if err := a.Dao().SaveRecord(record); err != nil {
-					log.Fatal(err)
-				}
-			*/
 		}
 	}
 
