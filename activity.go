@@ -37,6 +37,7 @@ func getLastTime(dao *daos.Dao) (int64, error) {
 }
 
 func doTail(a *pocketbase.PocketBase) {
+	onair := make(map[string]string)	// map of module to last record id
 	reOpening := regexp.MustCompile(`Opening stream on module (?P<module>[A-Z]) for client (?P<client>[^\s]+)\s+(?P<clientmod>.) with sid \d{1,} by user (?P<user>.*)`)
 	reClosing := regexp.MustCompile(`Closing stream of module ([A-Z])`)
 
@@ -86,6 +87,7 @@ func doTail(a *pocketbase.PocketBase) {
 				via = via + "-" + groups[3]
 			}
 			record.Set("ts", uTs)
+			record.Set("tsoff", 0)
 			record.Set("system", "299")
 			record.Set("module", groups[1])
 			record.Set("call", strings.Split(groups[4], " ")[0])
@@ -93,17 +95,22 @@ func doTail(a *pocketbase.PocketBase) {
 			if err := a.Dao().SaveRecord(record); err != nil {
 				log.Fatal(err)
 			}
+			// save the Id of the onair record
+			onair[groups[1]] = record.Id;
 		}
 		groups = reClosing.FindStringSubmatch(line.Text)
 		if len(groups) == 2 {
-			record := models.NewRecord(collection)
-			record.Set("ts", uTs)
-			record.Set("system", "299")
-			record.Set("module", parts[7])
-			record.Set("call", "")
-			record.Set("via", "")
-			if err := a.Dao().SaveRecord(record); err != nil {
-				log.Fatal(err)
+			module := parts[7]
+			id, ok := onair[module]
+			if ok {
+				record, err := a.Dao().FindRecordById("activity", id)
+				if err != nil {
+					log.Fatal(err)
+				}
+				record.Set("tsoff", uTs)
+				if err := a.Dao().SaveRecord(record); err != nil {
+					log.Fatal(err)
+				}
 			}
 		}
 	}
