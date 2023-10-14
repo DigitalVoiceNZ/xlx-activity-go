@@ -29,3 +29,7 @@ pb_data
 *.swap
 .vscode/
 
+# tools
+.env
+node_modules
+
