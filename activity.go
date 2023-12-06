@@ -97,11 +97,13 @@ func doTail(a *pocketbase.PocketBase) {
 			}
 			// save the Id of the onair record
 			onair[groups[1]] = record.Id;
+			log.Printf("+++ on +++ %s on %s %d %s", strings.Split(groups[4], " ")[0], groups[1], uTs, record.Id);
 		}
 		groups = reClosing.FindStringSubmatch(line.Text)
 		if len(groups) == 2 {
 			module := parts[7]
 			id, ok := onair[module]
+			log.Printf("--- off --   mod %s %s %d", module, id, uTs);
 			if ok {
 				record, err := a.Dao().FindRecordById("activity", id)
 				if err != nil {
@@ -111,6 +113,8 @@ func doTail(a *pocketbase.PocketBase) {
 				if err := a.Dao().SaveRecord(record); err != nil {
 					log.Fatal(err)
 				}
+			} else {
+			  log.Printf("!!! off with no on !!! mod %s", module);
 			}
 		}
 	}
