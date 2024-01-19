@@ -72,7 +72,10 @@ func doTail(a *pocketbase.PocketBase) {
 		}
 		ts, err := time.ParseInLocation(time.RFC3339Nano, parts[0], tzLocation)
 		if err != nil {
-			log.Fatal(err)
+			// tail sometimes leaves a truncated date
+			// log.Fatal(err)
+			ts = time.Now()		// or maybe last parsed time plus inc
+			log.Printf("Error: Unable to parse time %s\n", parts[0])
 		}
 		uTs := ts.UnixMilli()
 		if uTs <= lastTime {
