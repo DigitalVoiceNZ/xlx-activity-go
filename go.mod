@@ -1,6 +1,6 @@
 module dvnz.nz/activity
 
-go 1.19
+go 1.21
 
 require (
 	github.com/nxadm/tail v1.4.11
