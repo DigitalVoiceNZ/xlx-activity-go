@@ -3,6 +3,7 @@ activity
 
 # database
 pb_data
+data.db
 
 # Binaries for programs and plugins
 *.exe
@@ -32,4 +33,4 @@ pb_data
 # tools
 .env
 node_modules
-
+log.txt
