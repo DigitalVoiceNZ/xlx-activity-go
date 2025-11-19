@@ -10,51 +10,55 @@ import (
 	"sync"
 )
 
-// ActivityChannel is a channel for broadcasting activity events.
-var ActivityChannel = make(chan Activity)
+// sseHandler creates an HTTP handler for an SSE stream that registers
+// itself with a broadcaster.
+func sseHandler(b *Broadcaster) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
 
-// sseHandler handles SSE requests and streams activity events to clients.
-func sseHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "Streaming unsupported!", http.StatusInternalServerError)
-		return
-	}
-
-	slog.Info("Client connected to SSE endpoint")
-
-	// Send a welcome message
-	fmt.Fprintf(w, "data: %s\n\n", "Welcome to the activity stream!")
-	flusher.Flush()
-
-	for {
-		select {
-		case activity := <-ActivityChannel:
-			data, err := json.Marshal(activity)
-			if err != nil {
-				slog.Error("Failed to marshal activity", "error", err)
-				continue
-			}
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			flusher.Flush()
-		case <-r.Context().Done():
-			slog.Info("Client disconnected from SSE endpoint")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "Streaming unsupported!", http.StatusInternalServerError)
 			return
+		}
+
+		// Create a channel for this specific client.
+		clientChan := make(chan Activity, 10) // Buffer to absorb some burstiness.
+		b.Register(clientChan)
+		defer b.Unregister(clientChan)
+
+		slog.Info("Client connected to SSE endpoint")
+		fmt.Fprintf(w, "data: %s\n\n", "Welcome to the activity stream!")
+		flusher.Flush()
+
+		ctx := r.Context()
+		for {
+			select {
+			case msg := <-clientChan:
+				data, err := json.Marshal(msg)
+				if err != nil {
+					slog.Error("Failed to marshal activity for SSE", "error", err)
+					continue
+				}
+				fmt.Fprintf(w, "data: %s\n\n", data)
+				flusher.Flush()
+			case <-ctx.Done():
+				slog.Info("Client disconnected from SSE endpoint")
+				return
+			}
 		}
 	}
 }
 
 // startSSE starts the HTTP server for the SSE endpoint.
-func startSSE(ctx context.Context, wg *sync.WaitGroup, addr string) {
+func startSSE(ctx context.Context, wg *sync.WaitGroup, addr string, b *Broadcaster) {
 	defer wg.Done()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/sse", sseHandler)
+	mux.HandleFunc("/sse", sseHandler(b))
 
 	server := &http.Server{
 		Addr:    addr,

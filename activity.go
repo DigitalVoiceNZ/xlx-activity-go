@@ -28,7 +28,7 @@ var (
 )
 
 // doTail tails the system log file and processes entries related to XLX activity.
-func doTail(ctx context.Context, wg *sync.WaitGroup, db *sql.DB, config *Config) {
+func doTail(ctx context.Context, wg *sync.WaitGroup, db *sql.DB, config *Config, b *Broadcaster) {
 	defer wg.Done()
 	onair := make(map[string]Activity) // map of module to last activity
 
@@ -100,7 +100,7 @@ func doTail(ctx context.Context, wg *sync.WaitGroup, db *sql.DB, config *Config)
 				}
 				// save the Id of the onair record
 				onair[groups[1]] = activity
-				ActivityChannel <- activity
+				b.Submit(activity)
 				slog.Info("+++ on  +++",
 					"call", activity.Call,
 					"module", activity.Module,
@@ -118,7 +118,7 @@ func doTail(ctx context.Context, wg *sync.WaitGroup, db *sql.DB, config *Config)
 						continue
 					}
 					activity.Tsoff = uTs
-					ActivityChannel <- activity
+					b.Submit(activity)
 				} else {
 					slog.Warn("Disconnect without connect record", "module", module)
 				}
@@ -162,11 +162,14 @@ func main() {
 	}
 	defer db.Close()
 
-	var wg sync.WaitGroup
-	wg.Add(2)
+	broadcaster := NewBroadcaster()
 
-	go doTail(ctx, &wg, db, config)
-	go startSSE(ctx, &wg, config.SSEAddr)
+	var wg sync.WaitGroup
+	wg.Add(3) // doTail, startSSE, and broadcaster
+
+	go broadcaster.Run(ctx, &wg)
+	go doTail(ctx, &wg, db, config, broadcaster)
+	go startSSE(ctx, &wg, config.SSEAddr, broadcaster)
 
 	<-ctx.Done()
 	slog.Info("Shutting down...")
