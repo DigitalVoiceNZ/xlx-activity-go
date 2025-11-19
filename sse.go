@@ -13,8 +13,7 @@ import (
 // ActivityChannel is a channel for broadcasting activity events.
 var ActivityChannel = make(chan Activity)
 
-// sseHandler handles the SSE requests.
-// It sends activity events to the connected clients.
+// sseHandler handles SSE requests and streams activity events to clients.
 func sseHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -50,7 +49,7 @@ func sseHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// startSSE starts a new HTTP server for SSE.
+// startSSE starts the HTTP server for the SSE endpoint.
 func startSSE(ctx context.Context, wg *sync.WaitGroup, addr string) {
 	defer wg.Done()
 

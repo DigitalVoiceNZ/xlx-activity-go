@@ -24,12 +24,8 @@ type Activity struct {
 }
 
 // initDB initializes the SQLite database and creates the activity table if it doesn't exist.
-//
-// Returns:
-//   - *sql.DB: A pointer to the database connection object.
-//   - error: An error if the database connection or table creation fails.
-func initDB() (*sql.DB, error) {
-	db, err := sql.Open("sqlite3", "./pb_data/data.db")
+func initDB(dbPath string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, err
 	}
@@ -63,15 +59,6 @@ func initDB() (*sql.DB, error) {
 }
 
 // getLastTime retrieves the timestamp of the most recent activity record for a given system.
-//
-// Parameters:
-//   - ctx: The context to control the query.
-//   - db: A pointer to the database connection object.
-//   - system: The system identifier to filter by.
-//
-// Returns:
-//   - int64: The timestamp of the most recent record in milliseconds since epoch.
-//   - error: An error if the database query fails.
 func getLastTime(ctx context.Context, db *sql.DB, system string) (int64, error) {
 	var ts float64
 	err := db.QueryRowContext(ctx, "SELECT ts FROM activity WHERE system = ? ORDER BY ts DESC LIMIT 1", system).Scan(&ts)
@@ -85,14 +72,6 @@ func getLastTime(ctx context.Context, db *sql.DB, system string) (int64, error) 
 }
 
 // saveActivity saves an activity record to the database.
-//
-// Parameters:
-//   - ctx: The context to control the query.
-//   - db: A pointer to the database connection object.
-//   - activity: The Activity object to save.
-//
-// Returns:
-//   - error: An error if the database operation fails.
 func saveActivity(ctx context.Context, db *sql.DB, activity Activity) error {
 	_, err := db.ExecContext(ctx, `
         INSERT INTO activity (id, call, created, module, system, updated, via, ts, tsoff)
@@ -102,15 +81,6 @@ func saveActivity(ctx context.Context, db *sql.DB, activity Activity) error {
 }
 
 // updateActivityTsoff updates the tsoff timestamp for an activity record.
-//
-// Parameters:
-//   - ctx: The context to control the query.
-//   - db: A pointer to the database connection object.
-//   - id: The ID of the record to update.
-//   - tsoff: The new tsoff value.
-//
-// Returns:
-//   - error: An error if the database operation fails.
 func updateActivityTsoff(ctx context.Context, db *sql.DB, id string, tsoff int64) error {
 	_, err := db.ExecContext(ctx, "UPDATE activity SET tsoff = ? WHERE id = ?", tsoff, id)
 	return err

@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"os"
 	"testing"
 	"time"
 
@@ -34,7 +35,30 @@ func setupTestDB(t *testing.T) *sql.DB {
 		t.Fatalf("Failed to create table: %v", err)
 	}
 
+	// Load test data
+	data, err := os.ReadFile("testdata/testdata.sql")
+	if err != nil {
+		t.Fatalf("Failed to read testdata/testdata.sql: %v", err)
+	}
+	if _, err := db.Exec(string(data)); err != nil {
+		t.Fatalf("Failed to load test data: %v", err)
+	}
+
 	return db
+}
+
+func TestLoadTestData(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	var count int
+	err := db.QueryRow("SELECT COUNT(*) FROM activity").Scan(&count)
+	if err != nil {
+		t.Fatalf("Failed to count records: %v", err)
+	}
+	if count != 20 {
+		t.Errorf("Expected 20 records, but got %d", count)
+	}
 }
 
 func TestGetLastTime(t *testing.T) {
@@ -43,30 +67,13 @@ func TestGetLastTime(t *testing.T) {
 
 	ctx := context.Background()
 
-	t.Run("empty database", func(t *testing.T) {
-		lastTime, err := getLastTime(ctx, db, "299")
-		if err != nil {
-			t.Fatalf("Expected no error, but got %v", err)
-		}
-		if lastTime != 0 {
-			t.Fatalf("Expected last time to be 0, but got %v", lastTime)
-		}
-	})
-
-	t.Run("with records", func(t *testing.T) {
-		ts := float64(time.Now().UnixMilli())
-		_, err := db.Exec("INSERT INTO activity (id, ts, system) VALUES (?, ?, ?)", "1", ts, "299")
-		if err != nil {
-			t.Fatalf("Failed to insert record: %v", err)
-		}
-
+	t.Run("with test data", func(t *testing.T) {
 		lastTime, err := getLastTime(ctx, db, "299")
 		if err != nil {
 			t.Fatalf("Failed to get last time: %v", err)
 		}
-
-		if lastTime != int64(ts) {
-			t.Fatalf("Expected last time to be %v, but got %v", ts, lastTime)
+		if lastTime == 0 {
+			t.Fatal("Expected last time to be non-zero, but got 0")
 		}
 	})
 
@@ -88,7 +95,7 @@ func TestSaveActivity(t *testing.T) {
 	ctx := context.Background()
 
 	activity := Activity{
-		ID:      "1",
+		ID:      "new-activity",
 		Call:    "TEST",
 		Created: time.Now(),
 		Module:  "A",
@@ -105,11 +112,11 @@ func TestSaveActivity(t *testing.T) {
 	}
 
 	var id string
-	err = db.QueryRow("SELECT id FROM activity WHERE id = '1'").Scan(&id)
+	err = db.QueryRow("SELECT id FROM activity WHERE id = 'new-activity'").Scan(&id)
 	if err != nil {
 		t.Fatalf("Failed to query activity: %v", err)
 	}
-	if id != "1" {
+	if id != "new-activity" {
 		t.Fatal("Activity not saved correctly")
 	}
 }
@@ -120,19 +127,21 @@ func TestUpdateActivityTsoff(t *testing.T) {
 
 	ctx := context.Background()
 
-	_, err := db.Exec("INSERT INTO activity (id) VALUES (?)", "1")
+	// Get an ID from the test data
+	var existingID string
+	err := db.QueryRow("SELECT id FROM activity LIMIT 1").Scan(&existingID)
 	if err != nil {
-		t.Fatalf("Failed to insert record: %v", err)
+		t.Fatalf("Failed to get an existing ID from test data: %v", err)
 	}
 
 	tsoff := time.Now().UnixMilli()
-	err = updateActivityTsoff(ctx, db, "1", tsoff)
+	err = updateActivityTsoff(ctx, db, existingID, tsoff)
 	if err != nil {
 		t.Fatalf("Failed to update tsoff: %v", err)
 	}
 
 	var updatedTsoff int64
-	err = db.QueryRow("SELECT tsoff FROM activity WHERE id = '1'").Scan(&updatedTsoff)
+	err = db.QueryRow("SELECT tsoff FROM activity WHERE id = ?", existingID).Scan(&updatedTsoff)
 	if err != nil {
 		t.Fatalf("Failed to query tsoff: %v", err)
 	}

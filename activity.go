@@ -28,30 +28,25 @@ var (
 )
 
 // doTail tails the system log file and processes entries related to XLX activity.
-// It records connection and disconnection events in the SQLite database.
-// Parameters:
-//   - ctx: The context to control the goroutine.
-//   - wg: The WaitGroup to signal when the goroutine is finished.
-//   - db: A pointer to the database connection object.
-func doTail(ctx context.Context, wg *sync.WaitGroup, db *sql.DB) {
+func doTail(ctx context.Context, wg *sync.WaitGroup, db *sql.DB, config *Config) {
 	defer wg.Done()
 	onair := make(map[string]Activity) // map of module to last activity
 
 	t, err := tail.TailFile(
-		"/var/log/syslog", tail.Config{Follow: true, ReOpen: true})
+		config.LogPath, tail.Config{Follow: true, ReOpen: true})
 	if err != nil {
 		slog.Error("Failed to tail file", "error", err)
 		return
 	}
 
-	lastTime, err := getLastTime(ctx, db, "299")
+	lastTime, err := getLastTime(ctx, db, config.SystemName)
 	if err != nil {
 		slog.Error("Failed to get last activity time", "error", err)
 		return
 	}
 	slog.Info("Retrieved last activity time", "timestamp", lastTime)
 
-	tzLocation, err := time.LoadLocation("Pacific/Auckland")
+	tzLocation, err := time.LoadLocation(config.Timezone)
 	if err != nil {
 		slog.Error("Failed to load timezone", "error", err)
 		return
@@ -92,7 +87,7 @@ func doTail(ctx context.Context, wg *sync.WaitGroup, db *sql.DB) {
 					ID:      uuid.New().String(),
 					Ts:      float64(uTs),
 					Tsoff:   0,
-					System:  "299",
+					System:  config.SystemName,
 					Module:  groups[1],
 					Call:    strings.Split(groups[4], " ")[0],
 					Via:     via,
@@ -132,15 +127,12 @@ func doTail(ctx context.Context, wg *sync.WaitGroup, db *sql.DB) {
 	}
 }
 
-// main initializes and starts the activity monitoring application.
-// It initializes the database and starts the log monitoring in a separate goroutine.
+// main is the entry point for the activity monitor application.
 func main() {
-	// Configure structured logger with environment variable support
-	// Parse log level from LOG_LEVEL env var (default to INFO if not set or invalid)
+	config := LoadConfig()
+
 	var logLevel slog.LevelVar
 	logLevel.Set(slog.LevelDebug) // Default level
-
-	// Parse level from environment (empty string if not set)
 	if envLevel := os.Getenv("LOG_LEVEL"); envLevel != "" {
 		if err := logLevel.UnmarshalText([]byte(envLevel)); err != nil {
 			fmt.Printf("Invalid LOG_LEVEL: %s, using INFO\n", envLevel)
@@ -152,12 +144,18 @@ func main() {
 	})
 	slog.SetDefault(slog.New(logHandler))
 
-	slog.Info("Activity monitor starting", "args", os.Args)
+	slog.Info("Activity monitor starting",
+		"args", os.Args,
+		"system_name", config.SystemName,
+		"timezone", config.Timezone,
+		"db_path", config.DBPath,
+		"sse_addr", config.SSEAddr,
+		"log_path", config.LogPath)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	db, err := initDB()
+	db, err := initDB(config.DBPath)
 	if err != nil {
 		slog.Error("Failed to initialize database", "error", err)
 		os.Exit(1)
@@ -167,8 +165,8 @@ func main() {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	go doTail(ctx, &wg, db)
-	go startSSE(ctx, &wg, ":8080")
+	go doTail(ctx, &wg, db, config)
+	go startSSE(ctx, &wg, config.SSEAddr)
 
 	<-ctx.Done()
 	slog.Info("Shutting down...")
