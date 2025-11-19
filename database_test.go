@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -148,5 +149,38 @@ func TestUpdateActivityTsoff(t *testing.T) {
 
 	if updatedTsoff != tsoff {
 		t.Fatalf("Expected tsoff to be %v, but got %v", tsoff, updatedTsoff)
+	}
+}
+
+func TestInitDB_Creation(t *testing.T) {
+	// Generate a temporary file path, but ensure the file doesn't exist.
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+
+	// Call initDB with create = true on a non-existent path
+	db, err := initDB(dbPath, true)
+	if err != nil {
+		t.Fatalf("initDB with create=true failed: %v", err)
+	}
+	defer db.Close()
+
+	// Check that the table was created
+	var tableName string
+	err = db.QueryRow("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'activity'").Scan(&tableName)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			t.Fatal("Table 'activity' was not created")
+		}
+		t.Fatalf("Failed to query for table: %v", err)
+	}
+
+	// Check that the index was created
+	var indexName string
+	err = db.QueryRow("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'callmodts'").Scan(&indexName)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			t.Fatal("Index 'callmodts' was not created")
+		}
+		t.Fatalf("Failed to query for index: %v", err)
 	}
 }

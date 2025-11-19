@@ -4,7 +4,10 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -23,38 +26,73 @@ type Activity struct {
 	Tsoff   int64
 }
 
-// initDB initializes the SQLite database and creates the activity table if it doesn't exist.
-func initDB(dbPath string) (*sql.DB, error) {
+// ErrDBNotFound is returned when the database file is not found and creation is not requested.
+var ErrDBNotFound = errors.New("database file not found")
+
+// initDB initializes the SQLite database. If create is false, it requires the
+// database file to already exist. If create is true, it will create the file
+// and the necessary schema.
+func initDB(dbPath string, create bool) (*sql.DB, error) {
+	// Check if the database file already exists.
+	_, err := os.Stat(dbPath)
+	if os.IsNotExist(err) {
+		if !create {
+			return nil, ErrDBNotFound
+		}
+
+		slog.Info("Database not found, creating new one.", "path", dbPath)
+
+		// Create the directory if it doesn't exist.
+		dir := filepath.Dir(dbPath)
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			slog.Info("Creating database directory", "path", dir)
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				return nil, err
+			}
+		}
+
+		// Create and open the new database file.
+		db, err := sql.Open("sqlite3", dbPath)
+		if err != nil {
+			return nil, err
+		}
+
+		// Create the schema for the new database.
+		slog.Info("Creating database schema")
+		createTableSQL := `CREATE TABLE activity (
+			call TEXT DEFAULT '',
+			created TEXT DEFAULT '' NOT NULL,
+			id TEXT PRIMARY KEY NOT NULL,
+			module TEXT DEFAULT '',
+			system TEXT DEFAULT '',
+			updated TEXT DEFAULT '' NOT NULL,
+			via TEXT DEFAULT '',
+			ts REAL DEFAULT 0,
+			tsoff NUMERIC DEFAULT 0
+		);`
+		createIndexSQL := `CREATE INDEX callmodts ON activity (
+			call,
+			module,
+			tsoff
+		);`
+
+		if _, err := db.Exec(createTableSQL); err != nil {
+			return nil, err
+		}
+		if _, err := db.Exec(createIndexSQL); err != nil {
+			return nil, err
+		}
+
+		slog.Info("Database initialized successfully")
+		return db, nil
+	}
+
+	// If the file already exists, just open it.
+	slog.Info("Opening existing database", "path", dbPath)
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, err
 	}
-
-	// Create the activity table if it doesn't exist.
-	_, err = db.Exec(`
-        CREATE TABLE IF NOT EXISTS activity (
-            call TEXT DEFAULT '',
-            created TEXT DEFAULT '' NOT NULL,
-            id TEXT PRIMARY KEY NOT NULL,
-            module TEXT DEFAULT '',
-            system TEXT DEFAULT '',
-            updated TEXT DEFAULT '' NOT NULL,
-            via TEXT DEFAULT '',
-            ts REAL DEFAULT 0,
-            tsoff NUMERIC DEFAULT 0
-        );
-        CREATE INDEX IF NOT EXISTS _sjde62mkgzabz32_created_idx ON activity (created);
-        CREATE INDEX IF NOT EXISTS callmodts ON activity (
-            call,
-            module,
-            tsoff
-        );
-    `)
-	if err != nil {
-		return nil, err
-	}
-
-	slog.Info("Database initialized successfully")
 	return db, nil
 }
 

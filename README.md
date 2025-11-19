@@ -12,7 +12,9 @@ go build
 
 ## Configuration
 
-The application can be configured using environment variables. All configuration options have sensible defaults for typical XLX system deployments.
+The application can be configured using environment variables. All
+configuration options have sensible defaults for typical XLX system
+deployments.
 
 ### Environment Variables
 
@@ -51,5 +53,25 @@ To run the program with default configuration:
 ./activity
 ```
 
-The program will start monitoring the configured log file and provide an SSE endpoint for real-time activity updates.
+### Database Initialization
 
+On the initial run, you need to create the SQLite database file and its
+schema. Use the `--create-db` flag for this:
+
+```bash
+./activity --create-db
+```
+
+**Important:** This flag should only be used once to set up a new
+database. Subsequent runs should omit this flag. If the database file
+specified by `DB_PATH` does not exist and `--create-db` is not used, the
+application will exit with an error suggesting a configuration problem or
+that the database needs to be created.
+
+The program will then start monitoring the configured log file and provide
+an SSE endpoint for real-time activity updates.
+
+## History
+
+This program was originally written for the Digital Voice NZ
+[XLX299 dashboard](https://xlx299.nz/).

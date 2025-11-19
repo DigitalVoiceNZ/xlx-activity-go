@@ -7,6 +7,8 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
@@ -131,6 +133,9 @@ func doTail(ctx context.Context, wg *sync.WaitGroup, db *sql.DB, config *Config,
 func main() {
 	config := LoadConfig()
 
+	createDB := flag.Bool("create-db", false, "Create the database file if it does not exist")
+	flag.Parse()
+
 	var logLevel slog.LevelVar
 	logLevel.Set(slog.LevelDebug) // Default level
 	if envLevel := os.Getenv("LOG_LEVEL"); envLevel != "" {
@@ -155,8 +160,13 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	db, err := initDB(config.DBPath)
+	db, err := initDB(config.DBPath, *createDB)
 	if err != nil {
+		if errors.Is(err, ErrDBNotFound) {
+			slog.Error("Database file not found", "path", config.DBPath)
+			fmt.Println("Please run with the --create-db flag to create it.")
+			os.Exit(1)
+		}
 		slog.Error("Failed to initialize database", "error", err)
 		os.Exit(1)
 	}
