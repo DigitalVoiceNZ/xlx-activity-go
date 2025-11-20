@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -35,7 +36,13 @@ func doTail(ctx context.Context, wg *sync.WaitGroup, db *sql.DB, config *Config,
 	onair := make(map[string]Activity) // map of module to last activity
 
 	t, err := tail.TailFile(
-		config.LogPath, tail.Config{Follow: true, ReOpen: true})
+		config.LogPath,
+		tail.Config{
+			Follow:   true,
+			ReOpen:   true,
+			Location: &tail.SeekInfo{Offset: 0, Whence: io.SeekStart}, // Start from the beginning to catch up
+		},
+	)
 	if err != nil {
 		slog.Error("Failed to tail file", "error", err)
 		return
