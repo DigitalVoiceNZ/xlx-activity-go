@@ -1,0 +1,11 @@
+db_path   = "/usr/local/src/activity/activity.db"
+log_file  = "/var/log/syslog"
+http_addr = ":8090"
+timezone  = "Pacific/Auckland"
+system    = "299"
+
+[mqtt]
+enabled      = false
+broker       = "mqtt://localhost:1883"
+client_id    = "xlx299-activity"
+topic_prefix = "xlx/299/module"
