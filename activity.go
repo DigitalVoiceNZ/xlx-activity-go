@@ -100,48 +100,6 @@ func startJournalTail(ctx context.Context, app core.App) {
 		slog.Error("Failed to read cursor file", "path", cursorPath, "error", err)
 	}
 
-	lastTime, err := getLastTime(app)
-	if err != nil {
-		slog.Error("Failed to retrieve last activity time", "error", err)
-		return
-	}
-	slog.Info("Retrieved last activity time", "timestamp", lastTime)
-
-	// Prepare command arguments for journalctl
-	cmdArgs := []string{"--follow", "-o", "json", "SYSLOG_IDENTIFIER=xlxd"}
-
-	if cursorVal != "" {
-		slog.Info("Starting journalctl using cursor", "cursor", cursorVal)
-		cmdArgs = append(cmdArgs, fmt.Sprintf("--after-cursor=%s", cursorVal))
-	} else if lastTime > 0 {
-		sinceTime := time.UnixMilli(lastTime).UTC().Format("2006-01-02 15:04:05")
-		slog.Info("Starting journalctl since database lastTime", "time", sinceTime)
-		cmdArgs = append(cmdArgs, fmt.Sprintf("--since=%s", sinceTime))
-	} else {
-		slog.Info("Starting journalctl from the beginning of today")
-		cmdArgs = append(cmdArgs, "--since=today")
-	}
-
-	cmd := exec.CommandContext(ctx, "journalctl", cmdArgs...)
-	// Use modern Go 1.20+ Cancel field to send SIGINT for graceful shutdown of journalctl
-	cmd.Cancel = func() error {
-		if cmd.Process != nil {
-			return cmd.Process.Signal(os.Interrupt)
-		}
-		return nil
-	}
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		slog.Error("Failed to create stdout pipe for journalctl", "error", err)
-		return
-	}
-
-	if err := cmd.Start(); err != nil {
-		slog.Error("Failed to start journalctl", "error", err)
-		return
-	}
-
 	onair := make(map[string]string) // map of module to last record id
 
 	// Populate onair map with any currently active connections from database
@@ -161,132 +119,231 @@ func startJournalTail(ctx context.Context, app core.App) {
 		}
 	}
 
-	scanner := bufio.NewScanner(stdout)
-	var lastCursor string
+	for ctx.Err() == nil {
+		lastTime, err := getLastTime(app)
+		if err != nil {
+			slog.Error("Failed to retrieve last activity time", "error", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+				continue
+			}
+		}
 
-	defer func() {
+		// Prepare command arguments for journalctl
+		cmdArgs := []string{"--follow", "-o", "json", "SYSLOG_IDENTIFIER=xlxd"}
+
+		if cursorVal != "" {
+			slog.Info("Starting journalctl using cursor", "cursor", cursorVal)
+			cmdArgs = append(cmdArgs, fmt.Sprintf("--after-cursor=%s", cursorVal))
+		} else if lastTime > 0 {
+			sinceTime := time.UnixMilli(lastTime).UTC().Format("2006-01-02 15:04:05")
+			slog.Info("Starting journalctl since database lastTime", "time", sinceTime)
+			cmdArgs = append(cmdArgs, fmt.Sprintf("--since=%s", sinceTime))
+		} else {
+			slog.Info("Starting journalctl from the beginning of today")
+			cmdArgs = append(cmdArgs, "--since=today")
+		}
+
+		cmd := exec.CommandContext(ctx, "journalctl", cmdArgs...)
+		// Use modern Go 1.20+ Cancel field to send SIGINT for graceful shutdown of journalctl
+		cmd.Cancel = func() error {
+			if cmd.Process != nil {
+				return cmd.Process.Signal(os.Interrupt)
+			}
+			return nil
+		}
+
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			slog.Error("Failed to create stdout pipe for journalctl", "error", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+				continue
+			}
+		}
+
+		var stderrBuf strings.Builder
+		cmd.Stderr = &stderrBuf
+
+		if err := cmd.Start(); err != nil {
+			slog.Error("Failed to start journalctl", "error", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+				continue
+			}
+		}
+
+		startTime := time.Now()
+		scanner := bufio.NewScanner(stdout)
+		var lastCursor string
+
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			if len(line) == 0 {
+				continue
+			}
+
+			var entry JournalEntry
+			if err := json.Unmarshal(line, &entry); err != nil {
+				slog.Error("Failed to parse journal line JSON", "error", err, "line", string(line))
+				continue
+			}
+
+			if entry.Cursor != "" {
+				lastCursor = entry.Cursor
+				cursorVal = entry.Cursor
+			}
+
+			if strings.Contains(entry.Message, "Sending connect packet to XLX peer") {
+				continue
+			}
+
+			// Parse the timestamp of the entry in milliseconds
+			var uTs int64
+			if entry.RealtimeTimestamp != "" {
+				usec, err := strconv.ParseInt(entry.RealtimeTimestamp, 10, 64)
+				if err != nil {
+					slog.Error("Failed to parse realtime timestamp", "value", entry.RealtimeTimestamp, "error", err)
+					uTs = time.Now().UnixMilli()
+				} else {
+					uTs = usec / 1000
+				}
+			} else {
+				uTs = time.Now().UnixMilli()
+			}
+
+			// Safety check: skip processed logs if not using cursor and timestamp is older than lastTime from DB
+			if cursorVal == "" && lastTime > 0 && uTs <= lastTime {
+				continue
+			}
+
+			slog.Debug("Processing log line", "content", entry.Message)
+
+			// Parse connection events
+			groups := reOpening.FindStringSubmatch(entry.Message)
+			if len(groups) == 5 {
+				record := core.NewRecord(collection)
+				via := groups[2]
+				if groups[3] != " " {
+					via = via + "-" + groups[3]
+				}
+				record.Set("ts", uTs)
+				record.Set("tsoff", 0)
+				record.Set("system", "299")
+				record.Set("module", groups[1])
+				record.Set("call", strings.Split(groups[4], " ")[0])
+				record.Set("via", via)
+
+				if err := app.Save(record); err != nil {
+					slog.Error("Failed to save record", "error", err)
+					continue
+				}
+
+				onair[groups[1]] = record.Id
+				slog.Info("+++ on  +++",
+					"call", strings.Split(groups[4], " ")[0],
+					"module", groups[1],
+					"timestamp", uTs,
+					"recordId", record.Id)
+
+				// Persist cursor immediately upon successfully processing event
+				if lastCursor != "" {
+					if err := writeCursor(cursorPath, lastCursor); err != nil {
+						slog.Error("Failed to save cursor", "error", err)
+					}
+				}
+			}
+
+			// Parse disconnection events
+			groups = reClosing.FindStringSubmatch(entry.Message)
+			if len(groups) == 2 {
+				module := groups[1]
+				id, ok := onair[module]
+				slog.Info("--- off ---", "module", module, "recordId", id, "timestamp", uTs)
+				if ok {
+					record, err := app.FindRecordById("activity", id)
+					if err != nil {
+						slog.Error("Failed to find record", "id", id, "error", err)
+						continue
+					}
+					record.Set("tsoff", uTs)
+					if err := app.Save(record); err != nil {
+						slog.Error("Failed to save record", "id", id, "error", err)
+						continue
+					}
+					delete(onair, module)
+				} else {
+					slog.Warn("Disconnect without connect record", "module", module)
+				}
+
+				// Persist cursor immediately upon successfully processing event
+				if lastCursor != "" {
+					if err := writeCursor(cursorPath, lastCursor); err != nil {
+						slog.Error("Failed to save cursor", "error", err)
+					}
+				}
+			}
+		}
+
+		if err := scanner.Err(); err != nil {
+			// Ignore EOF / closed pipe errors during shutdown
+			if ctx.Err() == nil {
+				slog.Error("Scanner read error", "error", err)
+			}
+		}
+
 		// Wait for command exit to clean up resource/zombie processes
-		_ = cmd.Wait()
+		waitErr := cmd.Wait()
+		duration := time.Since(startTime)
+
 		if lastCursor != "" {
 			if err := writeCursor(cursorPath, lastCursor); err != nil {
 				slog.Error("Failed to save final cursor", "error", err)
 			} else {
-				slog.Info("Saved final cursor on shutdown", "cursor", lastCursor)
+				slog.Info("Saved final cursor on loop exit", "cursor", lastCursor)
 			}
 		}
-	}()
 
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
+		if waitErr != nil {
+			if ctx.Err() == nil {
+				slog.Error("journalctl process exited with error",
+					"error", waitErr,
+					"stderr", strings.TrimSpace(stderrBuf.String()),
+					"duration", duration)
 
-		var entry JournalEntry
-		if err := json.Unmarshal(line, &entry); err != nil {
-			slog.Error("Failed to parse journal line JSON", "error", err, "line", string(line))
-			continue
-		}
-
-		if entry.Cursor != "" {
-			lastCursor = entry.Cursor
-		}
-
-		if strings.Contains(entry.Message, "Sending connect packet to XLX peer") {
-			continue
-		}
-
-		// Parse the timestamp of the entry in milliseconds
-		var uTs int64
-		if entry.RealtimeTimestamp != "" {
-			usec, err := strconv.ParseInt(entry.RealtimeTimestamp, 10, 64)
-			if err != nil {
-				slog.Error("Failed to parse realtime timestamp", "value", entry.RealtimeTimestamp, "error", err)
-				uTs = time.Now().UnixMilli()
-			} else {
-				uTs = usec / 1000
+				// If it failed quickly and we used a cursor, clear it and try without cursor
+				if duration < 5*time.Second && cursorVal != "" {
+					slog.Warn("journalctl exited quickly; invalid cursor suspected. Clearing cursor and deleting cursor file.")
+					cursorVal = ""
+					if err := writeCursor(cursorPath, ""); err != nil {
+						slog.Error("Failed to clear cursor file", "error", err)
+					}
+				} else {
+					// If it failed quickly without a cursor, sleep to prevent hot looping
+					if duration < 5*time.Second {
+						slog.Info("Waiting 5s before restarting journalctl...")
+						select {
+						case <-ctx.Done():
+							return
+						case <-time.After(5 * time.Second):
+						}
+					}
+				}
 			}
 		} else {
-			uTs = time.Now().UnixMilli()
-		}
-
-		// Safety check: skip processed logs if not using cursor and timestamp is older than lastTime from DB
-		if cursorVal == "" && lastTime > 0 && uTs <= lastTime {
-			continue
-		}
-
-		slog.Debug("Processing log line", "content", entry.Message)
-
-		// Parse connection events
-		groups := reOpening.FindStringSubmatch(entry.Message)
-		if len(groups) == 5 {
-			record := core.NewRecord(collection)
-			via := groups[2]
-			if groups[3] != " " {
-				via = via + "-" + groups[3]
+			slog.Info("journalctl process exited normally", "duration", duration)
+			// Sleep briefly before restarting just in case
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(1 * time.Second):
 			}
-			record.Set("ts", uTs)
-			record.Set("tsoff", 0)
-			record.Set("system", "299")
-			record.Set("module", groups[1])
-			record.Set("call", strings.Split(groups[4], " ")[0])
-			record.Set("via", via)
-
-			if err := app.Save(record); err != nil {
-				slog.Error("Failed to save record", "error", err)
-				continue
-			}
-
-			onair[groups[1]] = record.Id
-			slog.Info("+++ on  +++",
-				"call", strings.Split(groups[4], " ")[0],
-				"module", groups[1],
-				"timestamp", uTs,
-				"recordId", record.Id)
-
-			// Persist cursor immediately upon successfully processing event
-			if lastCursor != "" {
-				if err := writeCursor(cursorPath, lastCursor); err != nil {
-					slog.Error("Failed to save cursor", "error", err)
-				}
-			}
-		}
-
-		// Parse disconnection events
-		groups = reClosing.FindStringSubmatch(entry.Message)
-		if len(groups) == 2 {
-			module := groups[1]
-			id, ok := onair[module]
-			slog.Info("--- off ---", "module", module, "recordId", id, "timestamp", uTs)
-			if ok {
-				record, err := app.FindRecordById("activity", id)
-				if err != nil {
-					slog.Error("Failed to find record", "id", id, "error", err)
-					continue
-				}
-				record.Set("tsoff", uTs)
-				if err := app.Save(record); err != nil {
-					slog.Error("Failed to save record", "id", id, "error", err)
-					continue
-				}
-				delete(onair, module)
-			} else {
-				slog.Warn("Disconnect without connect record", "module", module)
-			}
-
-			// Persist cursor immediately upon successfully processing event
-			if lastCursor != "" {
-				if err := writeCursor(cursorPath, lastCursor); err != nil {
-					slog.Error("Failed to save cursor", "error", err)
-				}
-			}
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		// Ignore EOF / closed pipe errors during shutdown
-		if ctx.Err() == nil {
-			slog.Error("Scanner read error", "error", err)
 		}
 	}
 }
